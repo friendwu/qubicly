@@ -2,6 +2,7 @@ import random
 import struct
 import socket
 import json
+from contextlib import contextmanager
 
 # --- Protocol-specific constants ---
 EXCHANGE_PUBLIC_PEERS = 0
@@ -51,13 +52,65 @@ NUMBER_OF_TRANSACTIONS_PER_TICK = 1024
 NUMBER_OF_COMPUTORS = 676
 ASSETS_DEPTH = 24  
 
+DEFAULT_TIMEOUT = 10
+
+@contextmanager
+def socket_timeout(sock, timeout):
+    old_timeout = sock.gettimeout()
+    sock.settimeout(timeout)
+    try:
+        yield
+    finally:
+        sock.settimeout(old_timeout)
+
+class QubicConnection:
+    def __init__(self, node_ip: str, node_port: int, timeout=DEFAULT_TIMEOUT):
+        self.node_ip = node_ip
+        self.node_port = node_port
+        self.timeout = timeout
+        self.conn = socket.create_connection((node_ip, node_port), timeout=timeout)
+
+    def close(self):
+        self.conn.close()
+
+    def must_recv(self, size: int):
+        data = b''
+        remaining = size
+        while remaining > 0:
+            chunk = self.conn.recv(remaining)
+            if not chunk:
+                self.recreate_connection()
+                raise ValueError(f"Connection closed while reading data: {remaining} < {size}")
+            data += chunk
+            remaining -= len(chunk)
+        return data
+    
+    def recreate_connection(self):
+        self.close()
+        self.conn = socket.create_connection((self.node_ip, self.node_port), timeout=self.timeout)
+    
+    def recv(self, size: int):
+        try:
+            with socket_timeout(self.conn, self.timeout):
+                return self.conn.recv(size)
+        except Exception as e:
+            self.recreate_connection()
+            raise e
+    
+    def sendall(self, data: bytes):
+        try:
+            with socket_timeout(self.conn, self.timeout):
+                self.conn.sendall(data)
+        except Exception as e:
+            self.recreate_connection()
+            raise e
 class RequestBody:
     def encode(self) -> bytes:
         raise NotImplementedError
     
 
 class ResponseBody:
-    def decode(self, conn: socket.socket):
+    def decode(self, conn: QubicConnection):
         raise NotImplementedError
 
 
@@ -94,7 +147,7 @@ class RequestResponseHeader:
     def decode(self, conn, expected_type):
         while True:
             # Read header (8 bytes) - big endian for header
-            header_data = must_recv(conn, 8)
+            header_data = conn.must_recv(8)
             
             self.size = list(header_data[0:3])
             self.type = header_data[3]
@@ -104,10 +157,11 @@ class RequestResponseHeader:
                 break
             
             if self.type == 0 or self.type != expected_type:
-                print(f"Invalid header type, expected {expected_type}, found {self.type}")
+                if self.type != 0:
+                    print(f"Invalid header type, expected {expected_type}, found {self.type}")
                 ignore_size = self.get_size() - 8  # header size is 8 bytes
                 if ignore_size > 0:
-                    must_recv(conn, ignore_size)
+                    conn.must_recv(ignore_size)
                 continue
             break
 
@@ -133,7 +187,7 @@ class IssuedAssetData:
 
     def decode(self, conn):
         # Read all fields at once: 32 bytes public key + 1 byte type + 7 bytes name + 1 byte decimal + 7 bytes unit = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         if len(data) < 48:
             raise ValueError("Failed to read complete IssuedAssetData")
         
@@ -169,7 +223,7 @@ class OwnedAssetData:
 
     def decode(self, conn):
         # Read main fields: 32 bytes public key + 1 byte type + 1 byte padding + 2 bytes contract + 4 bytes issuance + 8 bytes units = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         if len(data) < 48:
             raise ValueError("Failed to read OwnedAssetData main fields")
         
@@ -199,13 +253,13 @@ class AssetInfo:
         }
 
     def decode(self, conn):
-        header_data = must_recv(conn, 8)
+        header_data = conn.must_recv(8)
         
         self.tick, self.universe_index = struct.unpack('<II', header_data)
         
         # Read siblings array: ASSETS_DEPTH (24) entries of 32 bytes each = 768 bytes
         siblings_size = ASSETS_DEPTH * 32
-        siblings_data = must_recv(conn, siblings_size)
+        siblings_data = conn.must_recv(siblings_size)
         if len(siblings_data) < siblings_size:
             raise ValueError("Failed to read AssetInfo siblings")
         
@@ -295,7 +349,7 @@ class PossessedAssetData:
 
     def decode(self, conn):
         # Read all fields: 32 bytes public key + 1 byte type + 1 byte padding + 2 bytes contract + 4 bytes issuance + 8 bytes units = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         
         # Extract public key (32 bytes)
         self.public_key = data[0:32]
@@ -399,7 +453,7 @@ class AssetIssuanceData:
 
     def decode(self, conn):
         # Read all fields at once: 32 bytes public key + 1 byte type + 7 bytes name + 1 byte decimal + 7 bytes unit = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         
         # Extract public key (32 bytes)
         self.public_key = data[0:32]
@@ -424,7 +478,7 @@ class AssetOwnershipData:
 
     def decode(self, conn):
         # Read all fields: 32 bytes public key + 1 byte type + 1 byte padding + 2 bytes contract + 4 bytes issuance + 8 bytes units = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         
         # Extract public key (32 bytes)
         self.public_key = data[0:32]
@@ -449,7 +503,7 @@ class AssetPossessionData:
 
     def decode(self, conn):
         # Read all fields: 32 bytes public key + 1 byte type + 1 byte padding + 2 bytes contract + 4 bytes ownership + 8 bytes units = 48 bytes
-        data = must_recv(conn, 48)
+        data = conn.must_recv(48)
         
         # Extract public key (32 bytes)
         self.public_key = data[0:32]
@@ -480,11 +534,11 @@ class AssetPossessions(ResponseBody):
             asset_possession_data.decode(conn)
             
             # Read tick (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             tick = struct.unpack('<I', data)[0]
             
             # Read universe index (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             universe_index = struct.unpack('<I', data)[0]
             
             asset_possession = AssetPossession()
@@ -511,11 +565,11 @@ class AssetOwnerships(ResponseBody):
             asset_ownership_data.decode(conn)
             
             # Read tick (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             tick = struct.unpack('<I', data)[0]
             
             # Read universe index (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             universe_index = struct.unpack('<I', data)[0]
             
             asset_ownership = AssetOwnership()
@@ -542,11 +596,11 @@ class AssetIssuances(ResponseBody):
             issued_asset_data.decode(conn)
             
             # Read tick (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             tick = struct.unpack('<I', data)[0]
             
             # Read universe index (4 bytes)
-            data = must_recv(conn, 4)
+            data = conn.must_recv(4)
             universe_index = struct.unpack('<I', data)[0]
             
             asset_issuance = AssetIssuance()
@@ -569,7 +623,7 @@ class PublicPeers(ResponseBody):
             return
         
         # Read 4 peer IP addresses (4 bytes each)
-        peers_data = must_recv(conn, 16)  # 4 peers * 4 bytes
+        peers_data = conn.must_recv(16)  # 4 peers * 4 bytes
         
         # Process each peer IP
         for i in range(0, 16, 4):
@@ -607,7 +661,7 @@ class AddressData:
 
     def decode(self, conn):
         # Read all fields: 32 bytes public key + 8+8 bytes amounts + 4*4 bytes counters/ticks = 64 bytes
-        data = must_recv(conn, 64)
+        data = conn.must_recv(64)
         
         # Extract public key (32 bytes)
         self.public_key = data[0:32]
@@ -648,12 +702,12 @@ class AddressInfo(ResponseBody):
         self.address_data.decode(conn)
         
         # Read tick and spectrum_index (8 bytes total)
-        data = must_recv(conn, 8)
+        data = conn.must_recv(8)
         self.tick, self.spectrum_index = struct.unpack('<Ii', data)
         
         # Read siblings array: SPECTRUM_DEPTH entries of 32 bytes each = 768 bytes
         siblings_size = self.SPECTRUM_DEPTH * 32
-        siblings_data = must_recv(conn, siblings_size)
+        siblings_data = conn.must_recv(siblings_size)
         
         # Split into 32-byte chunks
         self.siblings = []
@@ -693,7 +747,7 @@ class TickInfo(ResponseBody):
             
             # Read tick info payload (16 bytes) - little endian for data
             payload_size = 16
-            payload = must_recv(conn, payload_size)
+            payload = conn.must_recv(payload_size)
                 
             (
                 self.tick_duration,
@@ -775,7 +829,7 @@ class SystemInfo(ResponseBody):
             
             # Read system info payload (128 bytes) - little endian for data
             payload_size = 128
-            payload = must_recv(conn, payload_size)
+            payload = conn.must_recv(payload_size)
             
             # Parse all fields in one go
             # Format: hHIIIH6BII + 32s + iQQIQQQQQ = 128 bytes total
@@ -833,7 +887,7 @@ class Transaction:
 
     def decode(self, conn):
         # Read fixed-size fields: 32 + 32 + 8 + 4 + 2 + 2 = 80 bytes
-        fixed_data = must_recv(conn, 80)
+        fixed_data = conn.must_recv(80)
         
         # Extract public keys (64 bytes total)
         self.source_public_key = fixed_data[0:32]
@@ -844,10 +898,10 @@ class Transaction:
         
         # Read variable-size input data
         if self.input_size > 0:
-            self.input = must_recv(conn, self.input_size)
+            self.input = conn.must_recv(self.input_size)
         
         # Read signature (64 bytes)
-        self.signature = must_recv(conn, 64)
+        self.signature = conn.must_recv(64)
 
     def encode(self) -> bytes:
         """Encode transaction to binary format (MarshallBinary equivalent)"""
@@ -903,18 +957,18 @@ class TransactionStatus(ResponseBody):
             return
 
         # Read fixed fields (12 bytes): current_tick(I) + tick(I) + tx_count(I)
-        fixed_data = must_recv(conn, 12)
+        fixed_data = conn.must_recv(12)
         self.current_tick_of_node, self.tick, self.tx_count = struct.unpack('<III', fixed_data)
 
         # Read money_flew array: (NUMBER_OF_TRANSACTIONS_PER_TICK + 7) / 8 bytes = 128 bytes
         money_flew_size = (NUMBER_OF_TRANSACTIONS_PER_TICK + 7) // 8
-        self.money_flew = must_recv(conn, money_flew_size)
+        self.money_flew = conn.must_recv(money_flew_size)
 
 
         # Read transaction digests
         digest_size = self.tx_count * 32  # Each digest is 32 bytes
         if digest_size > 0:
-            digests_data = must_recv(conn, digest_size)
+            digests_data = conn.must_recv(digest_size)
             self.transaction_digests = [digests_data[i:i+32] for i in range(0, digest_size, 32)]
 
 class Transactions(ResponseBody):
@@ -969,22 +1023,22 @@ class TickData(ResponseBody):
             return
             
         # Read fixed fields in one recv
-        fixed_data = must_recv(conn, 16)  # 2+2+4+2+1+1+1+1+1+1 = 16 bytes
+        fixed_data = conn.must_recv(16)  # 2+2+4+2+1+1+1+1+1+1 = 16 bytes
         if len(fixed_data) < 16:
             raise ValueError("Failed to read tick data fixed fields")
             
         (self.computor_index, self.epoch, self.tick, self.millisecond, 
          self.second, self.minute, self.hour, self.day, self.month, self.year) = struct.unpack('<HHIHBBBBBB', fixed_data)
 
-        self.timelock = must_recv(conn, 32)
+        self.timelock = conn.must_recv(32)
         digest_size = NUMBER_OF_TRANSACTIONS_PER_TICK * 32
-        digests_data = must_recv(conn, digest_size)
+        digests_data = conn.must_recv(digest_size)
         self.transaction_digests = [digests_data[i:i+32] for i in range(0, digest_size, 32)]
 
-        fees_data = must_recv(conn, NUMBER_OF_TRANSACTIONS_PER_TICK * 8)
+        fees_data = conn.must_recv(NUMBER_OF_TRANSACTIONS_PER_TICK * 8)
         self.contract_fees = list(struct.unpack(f'<{NUMBER_OF_TRANSACTIONS_PER_TICK}q', fees_data))
 
-        self.signature = must_recv(conn, 64)
+        self.signature = conn.must_recv(64)
 
     def __str__(self):
         return json.dumps(self.__dict__(), indent=2)
@@ -1090,7 +1144,7 @@ class QuorumTickVote:
 
     def decode(self, conn: socket.socket):
         # Total size: 16 + 16 + (32 * 8) + 64 = 344 bytes
-        data = must_recv(conn, 344)
+        data = conn.must_recv(344)
 
         # Unpack fixed fields (16 bytes)
         (self.computor_index, self.epoch, self.tick, self.millisecond,
@@ -1134,17 +1188,6 @@ class QuorumVotes(ResponseBody):
             vote.decode(conn)
             self.votes.append(vote)
 
-def must_recv(conn: socket.socket, size: int):
-    data = b''
-    remaining = size
-    while remaining > 0:
-        chunk = conn.recv(remaining)
-        if not chunk:
-            raise ValueError(f"Connection closed while reading data: {remaining} < {size}")
-        data += chunk
-        remaining -= len(chunk)
-    return data
-
 class Computors(ResponseBody):
     NUMBER_OF_COMPUTORS = 676
     SIGNATURE_SIZE = 64
@@ -1173,11 +1216,11 @@ class Computors(ResponseBody):
                 return
 
             # Read epoch (2 bytes)
-            data = must_recv(conn, 2)
+            data = conn.must_recv(2)
             self.epoch = struct.unpack('<H', data)[0]
 
             # Read public keys (676 * 32 = 21632 bytes)
-            pub_keys_data = must_recv(conn, self.NUMBER_OF_COMPUTORS * 32)
+            pub_keys_data = conn.must_recv(self.NUMBER_OF_COMPUTORS * 32)
 
             # Split into 32-byte chunks
             self.pub_keys = []
@@ -1186,7 +1229,7 @@ class Computors(ResponseBody):
                 self.pub_keys.append(pub_key)
 
             # Read signature (64 bytes)
-            signature_data = must_recv(conn, self.SIGNATURE_SIZE)
+            signature_data = conn.must_recv(self.SIGNATURE_SIZE)
             self.signature = signature_data
 
             break
@@ -1207,7 +1250,7 @@ class SmartContractData(ResponseBody):
         data_size = header.get_size() - 8  # header size is 8 bytes
         
         # Read data
-        data = must_recv(conn, data_size)
+        data = conn.must_recv(data_size)
             
         self.data = data
 

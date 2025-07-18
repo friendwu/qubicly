@@ -1,25 +1,13 @@
 import socket
 import struct
 from .types import * 
-from contextlib import contextmanager
-
-DEFAULT_TIMEOUT = 30
-
-@contextmanager
-def socket_timeout(sock, timeout):
-    old_timeout = sock.gettimeout()
-    sock.settimeout(timeout)
-    try:
-        yield
-    finally:
-        sock.settimeout(old_timeout)
 
 class QubicClient:
     def __init__(self, node_ip: str, node_port: int, timeout=DEFAULT_TIMEOUT):
         self.node_ip = node_ip
         self.node_port = node_port
         self.timeout = timeout
-        self.conn = socket.create_connection((node_ip, node_port), timeout=timeout)
+        self.conn = QubicConnection(node_ip, node_port, timeout)
 
     def close(self):
         self.conn.close()
@@ -204,12 +192,17 @@ class QubicClient:
     
     def _send_request(self, request_type: int, request_data: RequestBody|bytes|None, dest=None):
         packet = self._serialize_request(request_type, request_data)
-        with socket_timeout(self.conn, self.timeout):
-            self.conn.sendall(packet)
-            if dest is not None:
-                return dest.decode(self.conn)  # Read response and decode
         
-        return None
+        for attempt in range(3):
+            try:
+                self.conn.sendall(packet)
+                if dest is not None:
+                    return dest.decode(self.conn)  # Read response and decode
+                return None
+            except Exception as e:
+                if attempt == 2:  # Last attempt
+                    raise e
+                continue
 
 
     def _serialize_request(self, request_type: int, request_data: RequestBody|bytes|None):
@@ -243,10 +236,9 @@ class QubicClient:
 
     def _send_smart_contract_request(self, rcf: RequestContractFunction, request_type, request_data: bytes, dest=None):
         packet = self._serialize_smart_contract_request(rcf, request_type, request_data)
-        with socket_timeout(self.conn, self.timeout):
-            self.conn.sendall(packet)
-            if dest is not None:
-                return dest.decode(self.conn.recv(4096))
+        self.conn.sendall(packet)
+        if dest is not None:
+            return dest.decode(self.conn)
         return None
 
 

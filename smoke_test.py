@@ -1,11 +1,17 @@
 from qubicly.qubic import QubicClient
 
+from dotenv import load_dotenv
+import os
 
 if __name__ == "__main__":
+    load_dotenv()
+    
     tick = 29669935
-    id = "AYVZGZNMKUSLZCHXVSUXNNYNINNAZARHNFTJSEYJKFETIRFMWKAGVVWCBCNJ"
+    id = os.getenv('QUBIC_ID', 'AYVZGZNMKUSLZCHXVSUXNNYNINNAZARHNFTJSEYJKFETIRFMWKAGVVWCBCNJ')
+    ip = os.getenv('QUBIC_NODE_IP', '178.39.19.107')
+    port = int(os.getenv('QUBIC_NODE_PORT', '21841'))
 
-    client = QubicClient("45.152.160.28", 21841)
+    client = QubicClient(ip, port)
     print("Tick info: ", client.get_tick_info())
     print("System info: ", client.get_system_info())
     # print(client.get_tx_status(29436874))
