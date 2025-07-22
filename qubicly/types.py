@@ -54,15 +54,6 @@ ASSETS_DEPTH = 24
 
 DEFAULT_TIMEOUT = 10
 
-@contextmanager
-def socket_timeout(sock, timeout):
-    old_timeout = sock.gettimeout()
-    sock.settimeout(timeout)
-    try:
-        yield
-    finally:
-        sock.settimeout(old_timeout)
-
 class QubicConnection:
     def __init__(self, node_ip: str, node_port: int, timeout=DEFAULT_TIMEOUT):
         self.node_ip = node_ip
@@ -77,30 +68,33 @@ class QubicConnection:
         data = b''
         remaining = size
         while remaining > 0:
-            chunk = self.conn.recv(remaining)
-            if not chunk:
+            try:
+                chunk = self.conn.recv(remaining)
+                if not chunk:
+                    self.recreate_connection()
+                    raise ValueError(f"Connection closed while reading data: {remaining} < {size}")
+                data += chunk
+                remaining -= len(chunk)
+            except socket.error as e:
                 self.recreate_connection()
-                raise ValueError(f"Connection closed while reading data: {remaining} < {size}")
-            data += chunk
-            remaining -= len(chunk)
+                raise e
         return data
     
     def recreate_connection(self):
+        print(f"Recreating connection to {self.node_ip}:{self.node_port}")
         self.close()
         self.conn = socket.create_connection((self.node_ip, self.node_port), timeout=self.timeout)
     
     def recv(self, size: int):
         try:
-            with socket_timeout(self.conn, self.timeout):
-                return self.conn.recv(size)
+            return self.conn.recv(size)
         except Exception as e:
             self.recreate_connection()
             raise e
     
     def sendall(self, data: bytes):
         try:
-            with socket_timeout(self.conn, self.timeout):
-                self.conn.sendall(data)
+            self.conn.sendall(data)
         except Exception as e:
             self.recreate_connection()
             raise e
@@ -144,7 +138,7 @@ class RequestResponseHeader:
         # 3 bytes size, 1 byte type, 4 bytes deja_vu
         return bytes(self.size) + struct.pack('<B', self.type) + struct.pack('<I', self.deja_vu)
 
-    def decode(self, conn, expected_type):
+    def decode(self, conn: QubicConnection, expected_type: int):
         while True:
             # Read header (8 bytes) - big endian for header
             header_data = conn.must_recv(8)

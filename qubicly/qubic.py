@@ -1,4 +1,3 @@
-import socket
 import struct
 from .types import * 
 
@@ -200,7 +199,8 @@ class QubicClient:
                     return dest.decode(self.conn)  # Read response and decode
                 return None
             except Exception as e:
-                if attempt == 2:  # Last attempt
+                print(f"Error sending request for {attempt + 1} times: {e}")
+                if attempt == 2:
                     raise e
                 continue
 
