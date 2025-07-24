@@ -1,11 +1,14 @@
-# Qubicly(Under development)
+# Qubicly
 
 A Python client library for the Qubic protocol, providing easy access to Qubic network functionality including transactions, assets, and system information.
 
 ## Installation
 
+~~pip install qubicly~~
+
 ```bash
-pip install qubicly
+pip install git+https://github.com/friendwu/qubicly.git@master
+
 ```
 
 ## Quick Start
