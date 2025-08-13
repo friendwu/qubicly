@@ -2,6 +2,14 @@
 
 A Python client library for the Qubic protocol, providing easy access to Qubic network functionality including transactions, assets, and system information.
 
+## Tested Functions
+- [x] get_tick_info
+- [x] get_system_info
+- [x] get_tick_data
+- [x] get_tick_transactions
+- [x] get_computors
+- [x] get_identity
+
 ## Installation
 
 ~~pip install qubicly~~
